@@ -1,0 +1,120 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - name: Necessary packages installation using APT
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+
+    vars:
+      packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+
+  - name: API Signing KEY for DOCKER
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: APT repository for UBUNTU Stble version 
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable
+      state: present
+
+  - name: Installing DOCKER with dependencies
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+
+    vars:
+      packages:
+      - docker-ce 
+      - docker-ce-cli 
+      - containerd.io
+
+    notify:
+      - docker status
+
+  - name: Adding VAGRANT user for DOCKER group
+    user:
+      name: vagrant
+      group: docker
+
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+      
+    with_items:
+      - swap
+      - none
+
+  - name: Disable SWAP
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: API Signing KEY for K8s
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: APT repository for K8s
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install K8s binaries
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+  - name: Node IP Configurations
+    lineinfile:
+      path: /etc/default/kubelet
+      line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+      create: yes
+
+  - name: Creating file for DOCKER
+    command: "{{ item }}"
+    with_items:
+     - sudo touch /etc/docker/daemon.json
+
+  - name: write var to file
+    copy: 
+      content: { "exec-opts": ["native.cgroupdriver=systemd"],"storage-driver": "overlay2" }
+      dest: /etc/docker/daemon.json
+
+  - name: Restart DOCKER
+    service:
+      name: docker
+      daemon_reload: yes
+      state: restarted
+  - name: Restart kubelet
+  
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+  - name: Copy the join command to server location
+    copy: src=join-command dest=/tmp/join-command.sh mode=0777
+
+  - name: Join the node to cluster
+    command: sh /tmp/join-command.sh
+
+  handlers:
+    - name: docker status
+      service: name=docker state=started
