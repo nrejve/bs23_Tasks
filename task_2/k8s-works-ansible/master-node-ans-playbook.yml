@@ -1,0 +1,138 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - name: Necessary packages installation using APT
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+
+  - name: API Signing KEY for DOCKER
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: APT repository for UBUNTU Stble version 
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable
+      state: present
+
+  - name: Installing DOCKER with dependencies
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - docker-ce 
+      - docker-ce-cli 
+      - containerd.io
+    notify:
+      - docker status
+
+  - name: Adding VAGRANT user for DOCKER group
+    user:
+      name: vagrant
+      group: docker
+
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable SWAP
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: API Signing KEY for K8s
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: APT repository for K8s
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install K8s binaries
+    apt: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet 
+        - kubeadm 
+        - kubectl
+
+  - name: Configure node IP
+    lineinfile:
+      path: /etc/default/kubelet
+      line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+      create: yes
+
+  - name: Creating file for DOCKER
+    command: "{{ item }}"
+    with_items:
+     - sudo touch /etc/docker/daemon.json
+
+  - name: write var to file
+    copy: 
+      content: { "exec-opts": ["native.cgroupdriver=systemd"],"storage-driver": "overlay2" }
+      dest: /etc/docker/daemon.json
+
+  - name: Restart DOCKER
+    service:
+      name: docker
+      daemon_reload: yes
+      state: restarted
+
+  - name: Restart kubelet
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+  - name: Initialize the K8s cluster using kubeadm
+    command: kubeadm init --apiserver-advertise-address="192.168.12.20" --apiserver-cert-extra-sans="192.168.12.20"  --node-name kube-master-node --pod-network-cidr=192.168.0.0/16
+
+  - name: Setup kubeconfig for VAGRANT user
+    command: "{{ item }}"
+    with_items:
+     - mkdir -p /home/vagrant/.kube
+     - cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+     - chown vagrant:vagrant /home/vagrant/.kube/config
+
+  - name: Generate join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy join command to local file
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+    become: false
+
+  - name: FLANNEL pod network YAML files
+    become: false
+    command: wget https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+    ignore_errors: yes
+
+  - name: Install the CNI Plugin
+    become: false  
+    command: kubectl apply -f  kube-flannel.yml
+    ignore_errors: yes
+
+  handlers:
+    - name: DOCKER status
+      service: name=docker state=started
